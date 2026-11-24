@@ -72,6 +72,12 @@ Linux / macOS 可将 `.\gradlew.bat` 替换为 `./gradlew`。
 
 构建产物位置：`app/build/outputs/apk/debug/app-debug.apk`。
 
+## 免责声明
+
+- 本项目仅供技术研究与学习交流使用，与 OPPO、ColorOS、小布助手（Breeno）及任何 AI 模型服务商均无官方关联。
+- 使用本项目所产生的任何后果（包括但不限于系统或应用更新导致的模块失效、第三方 API 费用与合规责任等）均由使用者自行承担；请勿将本项目用于违反当地法律法规或相关服务条款的用途。
+- 本项目遵循 [GPL-3.0-only](LICENSE) 开源协议，按“原样（AS IS）”提供，不作任何明示或暗示的担保。
+
 ## 致谢与协议
 
 - 上游项目：[SeimoDev/XiaoAiSwitch](https://github.com/SeimoDev/XiaoAiSwitch)（适配基线 `v0.10.12`）
