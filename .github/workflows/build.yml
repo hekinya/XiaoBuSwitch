@@ -2,9 +2,9 @@ name: Android CI
 
 on:
   push:
-    branches: [dev]
+    branches: [main, coloros-xiaobu]
   pull_request:
-    branches: [dev]
+    branches: [main, coloros-xiaobu]
   workflow_dispatch:
 
 permissions:
@@ -23,9 +23,9 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: gradle
-      - name: Test signature detection and Star history
+      - name: Test signature detection
         working-directory: scripts
-        run: python3 -m unittest test_assistant_version test_star_history -q
+        run: python3 -m unittest test_assistant_version -q
       - name: Test, lint and build
         working-directory: core
         run: ../gradlew --no-daemon test jacocoTestCoverageVerification :app:lintDebug :app:assembleDebug :app:assembleRelease

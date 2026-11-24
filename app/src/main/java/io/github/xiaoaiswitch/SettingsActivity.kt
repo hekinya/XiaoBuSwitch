@@ -353,12 +353,12 @@ private fun SettingsScreen() {
                                         providerReturn = "home"; page = "providers"; message = null
                                     }
                                 }
-                                Section("项目与社区") {
-                                    ChoiceRow("上游项目", "基于 SeimoDev/XiaoAiSwitch v0.10.12", "project_repository") {
-                                        openLink("https://github.com/SeimoDev/XiaoAiSwitch")
+                                Section("项目与致谢") {
+                                    ChoiceRow("项目仓库", "hekinya/XiaoBuSwitch", "project_repository") {
+                                        openLink("https://github.com/hekinya/XiaoBuSwitch")
                                     }
-                                    ChoiceRow("Telegram 频道", "t.me/xiaoaiswitch", "project_telegram") {
-                                        openLink("https://t.me/xiaoaiswitch")
+                                    ChoiceRow("上游项目", "基于 SeimoDev/XiaoAiSwitch v0.10.12 (GPL-3.0)", "project_upstream") {
+                                        openLink("https://github.com/SeimoDev/XiaoAiSwitch")
                                     }
                                 }
                             }
