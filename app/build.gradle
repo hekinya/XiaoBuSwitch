@@ -17,7 +17,30 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
-    buildTypes { release { minifyEnabled false } }
+    signingConfigs {
+        release {
+            def propsFile = rootProject.file('keystore.properties')
+            def props = new Properties()
+            if (propsFile.exists()) {
+                propsFile.withInputStream { props.load(it) }
+            }
+            def keystorePath = System.getenv('KEYSTORE_FILE') ?: props.getProperty('storeFile')
+            if (keystorePath) {
+                storeFile file(keystorePath)
+                storePassword System.getenv('KEYSTORE_PASSWORD') ?: props.getProperty('storePassword')
+                keyAlias System.getenv('KEY_ALIAS') ?: props.getProperty('keyAlias')
+                keyPassword System.getenv('KEY_PASSWORD') ?: props.getProperty('keyPassword')
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (signingConfigs.release.storeFile != null) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
     buildFeatures { compose true; buildConfig true }
     lint { abortOnError true }
 }
