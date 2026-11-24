@@ -74,7 +74,22 @@ class SettingsActivity : ComponentActivity() {
     }
 }
 
-private val routeDescriptions = listOf("日常问答与多轮对话，回复显示在小布原生对话卡片中")
+private val supportedRoutes = listOf(0, 4, 2)
+private val routeTitles = mapOf(
+    0 to "文本对话",
+    2 to "绘图",
+    4 to "识图"
+)
+private val routeDescriptions = mapOf(
+    0 to "日常问答与多轮对话，回复显示在小布原生对话卡片中",
+    2 to "文生图与原图编辑，生成结果回填到小布原生对话卡片中",
+    4 to "在小布中发送图片或带图提问时，调用自定义多模态识图模型"
+)
+private val routeSwitchSummaries = mapOf(
+    0 to "接管小布纯文本问答",
+    2 to "接管小布绘图与原图编辑",
+    4 to "接管小布图片输入与识图问答"
+)
 private val providerNames = listOf("API Key / OpenAI 兼容源", "Codex 订阅")
 
 @OptIn(ExperimentalComposeUiApi::class)
@@ -115,7 +130,6 @@ private fun SettingsScreen() {
     var seen by remember { mutableStateOf(preferences.getLong("seen", 0)) }
     var activeVersion by remember { mutableStateOf(preferences.getInt("activeVersion", 0)) }
     val active = activeVersion == BuildConfig.VERSION_CODE
-    val titles = listOf("文本对话")
     fun parent(screen: String) = when (screen) {
         "home" -> null
         "provider_edit" -> "providers"
@@ -226,7 +240,7 @@ private fun SettingsScreen() {
     val global: @Composable () -> Unit = {
         Column(verticalArrangement = Arrangement.spacedBy(26.dp)) {
             Section("适配范围") {
-                Text("当前版本针对 ColorOS 16.0.9.400（CN01）和小布 13.4.3（130403）适配。支持文本问答与多轮上下文，回答使用小布原生对话卡片。图片、手机控制和语音播报暂未接入。",
+                Text("当前版本针对 ColorOS 16.0.9.400（CN01）和小布 13.4.3（130403）适配。支持文本问答、多轮上下文、图片输入/识图以及文生图与原图编辑（支持自然语言自动调用绘图或 /draw 指令），结果使用小布原生对话卡片与图片卡片渲染。手机控制和语音播报暂未接入。",
                     fontSize = 14.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
             }
         }
@@ -235,9 +249,9 @@ private fun SettingsScreen() {
     val editor: @Composable () -> Unit = {
         Column(verticalArrangement = Arrangement.spacedBy(26.dp)) {
             Section("模型配置") {
-                Text(routeDescriptions[selected], fontSize = 13.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                Text(routeDescriptions[selected].orEmpty(), fontSize = 13.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
                 SwitchRow(if (thinkingSelected) "单独配置思考模式" else "使用自定义服务",
-                    if (thinkingSelected) "关闭后沿用默认配置" else "仅接管小布文本问答", channel.optBoolean("enabled"), "channel_switch") {
+                    if (thinkingSelected) "关闭后沿用默认配置" else routeSwitchSummaries[selected] ?: "接管该通道", channel.optBoolean("enabled"), "channel_switch") {
                     updateChannel(selected, "enabled", it)
                 }
                 ChoiceRow("AI Provider", selectedProvider?.name() ?: "选择已添加的 Provider", "provider_selector") {
@@ -295,7 +309,7 @@ private fun SettingsScreen() {
                         if (draft != saved) TextButton("保存", { save() }, modifier = Modifier.testTag("home_save"))
                     })
                 } else {
-                    SmallTopAppBar(title = when (screen) { "channel" -> titles[selected]; "general" -> "适配范围"; "providers" -> "AI Provider";
+                    SmallTopAppBar(title = when (screen) { "channel" -> routeTitles[selected] ?: "模型配置"; "general" -> "适配范围"; "providers" -> "AI Provider";
                         "provider_edit" -> if (providers.any { it.id() == editingProvider }) "编辑 Provider" else "添加 Provider"; else -> "运行状态" },
                         modifier = Modifier.widthIn(max = 768.dp).fillMaxWidth(),
                         navigationIcon = { BackButton("settings_back", ::back) })
@@ -335,7 +349,8 @@ private fun SettingsScreen() {
                                     color = if (failed) MiuixTheme.colorScheme.error else MiuixTheme.colorScheme.onSurfaceVariantSummary,
                                     modifier = Modifier.testTag("save_status"))
                                 Section("模型配置") {
-                                    titles.forEachIndexed { index, name ->
+                                    supportedRoutes.forEach { index ->
+                                        val name = routeTitles[index] ?: SettingsConfig.ROUTES[index]
                                         val profile = config.optJSONObject(SettingsConfig.ROUTES[index]) ?: JSONObject()
                                         val source = providers.firstOrNull { it.id() == profile.optString("providerId") }?.name() ?: "未选择 Provider"
                                         val thought = profile.optJSONObject("thinking")

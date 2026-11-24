@@ -14,11 +14,18 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 import io.github.xiaoaiswitch.core.ChatProtocol;
 import io.github.xiaoaiswitch.core.CodexClient;
 import io.github.xiaoaiswitch.core.CodexOAuth;
+import io.github.xiaoaiswitch.core.DialogueLoop;
+import io.github.xiaoaiswitch.core.DialogueProtocol;
+import io.github.xiaoaiswitch.core.ImageProtocol;
 import io.github.xiaoaiswitch.core.ModeProfiles;
 import io.github.xiaoaiswitch.core.ModelClient;
 import io.github.xiaoaiswitch.core.Profile;
+import io.github.xiaoaiswitch.core.QueryRouter;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -71,8 +78,10 @@ public final class BreenoHookEntry implements IXposedHookLoadPackage {
                         return;
                     }
                     validateRuntimeShape(helper, load.classLoader);
-                    new Runtime(context, load.classLoader).install(helper);
-                    report(context, "已加载小布 13.4.3 文本 Hook；请在小布 Switch 中配置文本模型", true);
+                    boolean visionReady = new Runtime(context, load.classLoader).install(helper);
+                    report(context, visionReady
+                            ? "已加载小布 13.4.3 文本、识图与绘图 Hook；请在小布 Switch 中配置模型"
+                            : "已加载小布 13.4.3 文本与绘图 Hook（识图附件未就绪）；请在小布 Switch 中配置模型", true);
                 } catch (Throwable error) {
                     report(context, "小布 Hook 安装失败：" + error.getClass().getSimpleName(), false);
                     XposedBridge.log("XiaoBuSwitch: install " + error);
@@ -144,14 +153,19 @@ public final class BreenoHookEntry implements IXposedHookLoadPackage {
         private final AtomicLong generation = new AtomicLong();
         private final AtomicReference<ActiveRequest> active = new AtomicReference<>();
         private final Map<String, JSONArray> histories = new LinkedHashMap<>();
+        private final Map<String, String> previousImages = new LinkedHashMap<>();
+        private final BreenoImageBridge imageBridge;
+        private Class<?> engineHelperClass;
         private long historyRevision = Long.MIN_VALUE;
 
         Runtime(Context context, ClassLoader loader) {
             this.context = context;
             this.loader = loader;
+            this.imageBridge = new BreenoImageBridge(context, loader, this::currentRoom);
         }
 
-        void install(Class<?> helper) {
+        boolean install(Class<?> helper) {
+            this.engineHelperClass = helper;
             Class<?> answerBean = XposedHelpers.findClass(
                     "com.heytap.speechassist.aichat.bean.AIChatViewBean", loader);
             XposedHelpers.findAndHookMethod(helper, "t", boolean.class, String.class, answerBean,
@@ -166,6 +180,7 @@ public final class BreenoHookEntry implements IXposedHookLoadPackage {
                             intercept(param);
                         }
                     });
+            return imageBridge.install(this::interceptImageOnly);
         }
 
         private void intercept(XC_MethodHook.MethodHookParam param) {
@@ -180,9 +195,14 @@ public final class BreenoHookEntry implements IXposedHookLoadPackage {
                 Bundle bubbleBundle = bundle == null ? new Bundle() : new Bundle(bundle);
                 boolean addQuery = Boolean.TRUE.equals(param.args[3]);
                 String boxTool = bundle == null ? null : bundle.getString("extra_box_toolTag");
+                boolean queryWithImage = bundle != null && (bundle.getBoolean("queryWithImage", false)
+                        || "image".equals(bundle.getString("extra_doc_type")));
+                ArrayList<String> docRecordIds = bundle == null ? null : bundle.getStringArrayList("extra_doc_recordid_list");
                 XposedBridge.log("XiaoBuSwitch: y called len=" + (text == null ? -1 : text.length())
                         + " inputType=" + param.args[1] + " addQuery=" + param.args[3]
-                        + " stateFlag=" + param.args[4] + " boxTool=" + boxTool);
+                        + " stateFlag=" + param.args[4] + " boxTool=" + boxTool
+                        + " withImage=" + queryWithImage
+                        + " docIds=" + (docRecordIds == null ? 0 : docRecordIds.size()));
                 if (text == null || text.trim().isEmpty() || !addQuery) {
                     XposedBridge.log("XiaoBuSwitch: skip input flags");
                     return;
@@ -197,9 +217,16 @@ public final class BreenoHookEntry implements IXposedHookLoadPackage {
                     XposedBridge.log("XiaoBuSwitch: skip master disabled");
                     return;
                 }
-                Profile profile = ModeProfiles.resolve(config, "chat", false);
+                QueryRouter.Selection selection = QueryRouter.select(text, "chat", false, queryWithImage);
+                String route = selection.route();
+                String queryText = selection.text();
+                if (!route.equals("chat") && !route.equals("vision") && !route.equals("image")) {
+                    XposedBridge.log("XiaoBuSwitch: skip unsupported route=" + route);
+                    return;
+                }
+                Profile profile = ModeProfiles.resolve(config, route, false);
                 if (!profile.enabled()) {
-                    XposedBridge.log("XiaoBuSwitch: skip chat disabled");
+                    XposedBridge.log("XiaoBuSwitch: skip " + route + " disabled");
                     return;
                 }
                 if (!nativeGuardsAllow(param.thisObject)) return;
@@ -209,7 +236,18 @@ public final class BreenoHookEntry implements IXposedHookLoadPackage {
                     XposedBridge.log("XiaoBuSwitch: skip empty roomId");
                     return;
                 }
-                XposedBridge.log("XiaoBuSwitch: intercepting provider=" + profile.provider() + " model=" + profile.model());
+                List<String> imageSources = queryWithImage
+                        ? imageBridge.resolveSources(roomId, docRecordIds)
+                        : Collections.emptyList();
+                if (route.equals("vision") && imageSources.isEmpty()) {
+                    XposedBridge.log("XiaoBuSwitch: skip vision without local image source");
+                    return;
+                }
+                if (queryWithImage) {
+                    imageBridge.clearRoomSnapshot(roomId);
+                }
+                XposedBridge.log("XiaoBuSwitch: intercepting route=" + route + " provider=" + profile.provider()
+                        + " model=" + profile.model() + " images=" + imageSources.size());
                 String suppliedRecordId = bubbleBundle.getString(RECORD_ID_KEY);
                 recordId = suppliedRecordId == null || suppliedRecordId.isEmpty()
                         ? UUID.randomUUID().toString() : suppliedRecordId;
@@ -223,7 +261,8 @@ public final class BreenoHookEntry implements IXposedHookLoadPackage {
 
                 long revision = config.optLong("revision", 0L);
                 JSONArray history = history(roomId, revision);
-                JSONObject request = ChatProtocol.request(profile, history, text);
+                JSONObject historyRequest = ChatProtocol.request(profile, history,
+                        !imageSources.isEmpty() ? "[附带图片] " + queryText : queryText);
                 requestId = generation.incrementAndGet();
                 ModelClient.Cancellation cancellation = new ModelClient.Cancellation();
                 requestState = new ActiveRequest(roomId, cancellation);
@@ -242,11 +281,17 @@ public final class BreenoHookEntry implements IXposedHookLoadPackage {
                     final String currentRoomId = roomId;
                     final String currentRecordId = recordId;
                     final ActiveRequest currentRequest = requestState;
-                    worker.execute(() -> ask(currentRequestId, revision, currentRoomId, currentRecordId,
-                            profile, request, currentRequest));
+                    final List<String> currentImages = imageSources;
+                    if (route.equals("image")) {
+                        worker.execute(() -> askImage(currentRequestId, revision, currentRoomId, currentRecordId,
+                                profile, queryText, currentImages, historyRequest, currentRequest));
+                    } else {
+                        worker.execute(() -> askDialogue(currentRequestId, revision, currentRoomId, currentRecordId,
+                                config, route, profile, history, queryText, currentImages, historyRequest, currentRequest));
+                    }
                 } catch (RuntimeException rejected) {
                     active.compareAndSet(requestState, null);
-                    showAnswer(requestId, roomId, recordId, "模型请求无法启动，请稍后重试。", false, null, null);
+                    showAnswer(requestId, roomId, recordId, "模型请求无法启动，请稍后重试。", false, null, null, Collections.emptyList());
                 }
             } catch (Throwable error) {
                 if (requestState != null) {
@@ -255,9 +300,68 @@ public final class BreenoHookEntry implements IXposedHookLoadPackage {
                 }
                 if (intercepted) {
                     showAnswer(requestId, roomId, recordId,
-                            "模型请求失败：" + errorText(error), false, null, null);
+                            "模型请求失败：" + errorText(error), false, null, null, Collections.emptyList());
                 }
                 XposedBridge.log("XiaoBuSwitch: request " + error.getClass().getSimpleName());
+            }
+        }
+
+        private void interceptImageOnly(XC_MethodHook.MethodHookParam param) {
+            boolean intercepted = false;
+            long requestId = -1L;
+            String roomId = "";
+            String recordId = "";
+            ActiveRequest requestState = null;
+            try {
+                JSONObject config = config();
+                if (!config.optBoolean("enabled", false)) return;
+                Profile profile = ModeProfiles.resolve(config, "vision", false);
+                if (!profile.enabled()) return;
+                Object engine = engineHelperClass == null ? null
+                        : XposedHelpers.getStaticObjectField(engineHelperClass, "INSTANCE");
+                if (engine != null && !nativeGuardsAllow(engine)) return;
+
+                roomId = currentRoom();
+                if (roomId.isEmpty()) return;
+                List<String> imageSources = imageBridge.captureHandleImages(param.thisObject, roomId);
+                if (imageSources.isEmpty()) return;
+
+                String prompt = imageSources.size() > 1 ? "请描述并分析这些图片。" : "请描述并分析这张图片。";
+                recordId = UUID.randomUUID().toString();
+                long revision = config.optLong("revision", 0L);
+                JSONArray history = history(roomId, revision);
+                JSONObject historyRequest = ChatProtocol.request(profile, history, "[附带图片] " + prompt);
+                requestId = generation.incrementAndGet();
+                ModelClient.Cancellation cancellation = new ModelClient.Cancellation();
+                requestState = new ActiveRequest(roomId, cancellation);
+                ActiveRequest previous = active.getAndSet(requestState);
+                if (previous != null) previous.cancellation.cancel();
+
+                XposedBridge.log("XiaoBuSwitch: intercepting image-only vision provider=" + profile.provider()
+                        + " model=" + profile.model() + " images=" + imageSources.size());
+                XposedHelpers.callMethod(param.thisObject, "F", roomId);
+                imageBridge.clearRoomSnapshot(roomId);
+                param.setResult(null);
+                intercepted = true;
+                setGenerating(roomId);
+                stopNativeTts();
+
+                final long currentRequestId = requestId;
+                final String currentRoomId = roomId;
+                final String currentRecordId = recordId;
+                final ActiveRequest currentRequest = requestState;
+                worker.execute(() -> askDialogue(currentRequestId, revision, currentRoomId, currentRecordId,
+                        config, "vision", profile, history, prompt, imageSources, historyRequest, currentRequest));
+            } catch (Throwable error) {
+                if (requestState != null) {
+                    active.compareAndSet(requestState, null);
+                    requestState.cancellation.cancel();
+                }
+                if (intercepted) {
+                    showAnswer(requestId, roomId, recordId,
+                            "识图请求失败：" + errorText(error), false, null, null, Collections.emptyList());
+                }
+                XposedBridge.log("XiaoBuSwitch: image-only " + error.getClass().getSimpleName());
             }
         }
 
@@ -354,28 +458,145 @@ public final class BreenoHookEntry implements IXposedHookLoadPackage {
             }
         }
 
-        private void ask(long requestId, long revision, String roomId, String recordId, Profile profile,
-                         JSONObject request, ActiveRequest requestState) {
+        private void askImage(long requestId, long revision, String roomId, String recordId, Profile profile,
+                              String prompt, List<String> imageSources, JSONObject historyRequest,
+                              ActiveRequest requestState) {
             try {
-                JSONObject response = chat(profile, request, requestState.cancellation);
-                String answer = ChatProtocol.answer(response);
-                XposedBridge.log("XiaoBuSwitch: answer received len=" + (answer == null ? -1 : answer.length()));
+                List<ModelClient.Image> originals = imageSources.isEmpty()
+                        ? Collections.emptyList()
+                        : imageBridge.loadImages(imageSources, requestState.cancellation);
+                List<BreenoImageBridge.RenderedImage> rendered = generateImages(roomId, profile, prompt, originals,
+                        requestState.cancellation);
+                if (rendered.isEmpty()) {
+                    throw new IllegalStateException("绘图服务未返回有效图片");
+                }
                 if (!isCurrent(requestId, revision)) {
                     resetIfLatest(requestId, roomId);
                     return;
                 }
-                showAnswer(requestId, roomId, recordId, answer, true, request, profile);
+                showAnswer(requestId, roomId, recordId, "已为你生成图片：", true, historyRequest, profile, rendered);
             } catch (java.util.concurrent.CancellationException ignored) {
-                // A newer question or a settings change superseded this request.
+                // Superseded by a newer request or settings change.
             } catch (Throwable error) {
-                XposedBridge.log("XiaoBuSwitch: ask failed " + error.getClass().getSimpleName() + ": " + errorText(error));
+                XposedBridge.log("XiaoBuSwitch: image failed " + error.getClass().getSimpleName() + ": " + errorText(error));
                 if (!isCurrent(requestId, revision)) {
                     resetIfLatest(requestId, roomId);
                     return;
                 }
-                showAnswer(requestId, roomId, recordId, "模型请求失败：" + errorText(error), false, null, null);
+                showAnswer(requestId, roomId, recordId, "绘图失败：" + errorText(error), false, null, null, Collections.emptyList());
             } finally {
                 active.compareAndSet(requestState, null);
+            }
+        }
+
+        private void askDialogue(long requestId, long revision, String roomId, String recordId, JSONObject config,
+                                 String route, Profile profile, JSONArray history, String text,
+                                 List<String> imageSources, JSONObject historyRequest, ActiveRequest requestState) {
+            try {
+                List<ModelClient.Image> attached = imageSources.isEmpty()
+                        ? Collections.emptyList()
+                        : imageBridge.loadImages(imageSources, requestState.cancellation);
+                if (route.equals("vision") && attached.isEmpty()) {
+                    throw new IllegalStateException("未读取到有效图片附件");
+                }
+                List<String> attachments = new ArrayList<>(attached.size());
+                for (ModelClient.Image image : attached) {
+                    attachments.add(BreenoImageBridge.dataUrl(image));
+                }
+                Profile imageProfile = ModeProfiles.resolve(config, "image", false);
+                boolean imageTool = config.optBoolean("autoRoute", true) && imageProfile.enabled();
+                DialogueProtocol.Tools tools = new DialogueProtocol.Tools(imageTool, false, false);
+                JSONObject request = DialogueProtocol.request(profile, history, text, attachments, tools);
+                List<BreenoImageBridge.RenderedImage> renderedImages = new ArrayList<>();
+                String answer;
+                if (imageTool) {
+                    DialogueLoop.Result result = DialogueLoop.run(profile, request, tools, task -> {
+                        if (!isCurrent(requestId, revision)) throw new java.util.concurrent.CancellationException();
+                        List<ModelClient.Image> originals = new ArrayList<>();
+                        if ("input".equals(task.image())) {
+                            if (attached.isEmpty()) throw new IllegalArgumentException("请先附加原图");
+                            originals.addAll(attached);
+                        } else if ("previous".equals(task.image())) {
+                            String prev = previousImage(roomId);
+                            if (prev.isEmpty()) throw new IllegalArgumentException("当前会话没有上次生成的图片");
+                            originals.add(imageBridge.loadSource(prev, requestState.cancellation));
+                        }
+                        List<BreenoImageBridge.RenderedImage> generated = generateImages(roomId, imageProfile,
+                                task.text(), originals, requestState.cancellation);
+                        renderedImages.addAll(generated);
+                        List<String> uris = new ArrayList<>(generated.size());
+                        for (BreenoImageBridge.RenderedImage item : generated) uris.add(item.fileUri());
+                        return new DialogueLoop.Result("已生成图片", uris);
+                    }, () -> isCurrent(requestId, revision), requestState.cancellation,
+                            (selected, bodyPart, cancel) -> chat(selected, bodyPart, cancel));
+                    answer = result.text();
+                } else {
+                    JSONObject response = chat(profile, request, requestState.cancellation);
+                    answer = ChatProtocol.answer(response);
+                }
+                XposedBridge.log("XiaoBuSwitch: " + route + " answer received len=" + (answer == null ? -1 : answer.length())
+                        + " generatedImages=" + renderedImages.size());
+                if (!isCurrent(requestId, revision)) {
+                    resetIfLatest(requestId, roomId);
+                    return;
+                }
+                showAnswer(requestId, roomId, recordId, answer, true, historyRequest, profile, renderedImages);
+            } catch (java.util.concurrent.CancellationException ignored) {
+                // Superseded by a newer request or settings change.
+            } catch (Throwable error) {
+                XposedBridge.log("XiaoBuSwitch: " + route + " failed " + error.getClass().getSimpleName() + ": " + errorText(error));
+                if (!isCurrent(requestId, revision)) {
+                    resetIfLatest(requestId, roomId);
+                    return;
+                }
+                String prefix = route.equals("vision") ? "识图请求失败：" : "模型请求失败：";
+                String extra = route.equals("vision") && error instanceof ModelClient.HttpError ? "（请确认所选模型支持图片输入）" : "";
+                showAnswer(requestId, roomId, recordId, prefix + errorText(error) + extra, false, null, null, Collections.emptyList());
+            } finally {
+                active.compareAndSet(requestState, null);
+            }
+        }
+
+        private List<BreenoImageBridge.RenderedImage> generateImages(String roomId, Profile profile, String prompt,
+                                                                   List<ModelClient.Image> originals,
+                                                                   ModelClient.Cancellation cancellation) throws Exception {
+            if (!profile.enabled()) throw new IllegalArgumentException("绘图通道未启用");
+            JSONObject response;
+            if ("codex_subscription".equals(profile.provider())) {
+                response = subscriptionImage(profile, prompt, originals, cancellation);
+            } else if (!originals.isEmpty()) {
+                response = ModelClient.edit(profile, prompt, originals, cancellation);
+            } else {
+                response = ModelClient.post(profile, profile.imageUrl(), ChatProtocol.imageRequest(profile, prompt), cancellation);
+            }
+            List<String> sources = ImageProtocol.sources(response);
+            List<BreenoImageBridge.RenderedImage> rendered = imageBridge.materializeGenerated(sources, cancellation);
+            if (!rendered.isEmpty() && roomId != null && !roomId.isEmpty()) {
+                synchronized (previousImages) {
+                    previousImages.put(roomId, rendered.get(rendered.size() - 1).fileUri());
+                    while (previousImages.size() > 8) {
+                        previousImages.remove(previousImages.keySet().iterator().next());
+                    }
+                }
+            }
+            return rendered;
+        }
+
+        private JSONObject subscriptionImage(Profile profile, String prompt, List<ModelClient.Image> originals,
+                                             ModelClient.Cancellation cancellation) throws Exception {
+            CodexOAuth.Tokens tokens = credentials(false, null);
+            try {
+                return CodexClient.images(profile, prompt, originals, tokens, cancellation);
+            } catch (ModelClient.HttpError error) {
+                if (error.status() != 401) throw error;
+                return CodexClient.images(profile, prompt, originals, credentials(true, tokens.accessToken()), cancellation);
+            }
+        }
+
+        private String previousImage(String roomId) {
+            synchronized (previousImages) {
+                String value = previousImages.get(roomId);
+                return value == null ? "" : value;
             }
         }
 
@@ -411,6 +632,9 @@ public final class BreenoHookEntry implements IXposedHookLoadPackage {
             synchronized (histories) {
                 if (historyRevision != revision) {
                     histories.clear();
+                    synchronized (previousImages) {
+                        previousImages.clear();
+                    }
                     historyRevision = revision;
                 }
                 JSONArray value = histories.get(roomId);
@@ -451,7 +675,8 @@ public final class BreenoHookEntry implements IXposedHookLoadPackage {
         }
 
         private void showAnswer(long requestId, String roomId, String recordId, String answer,
-                                boolean addHistory, JSONObject request, Profile profile) {
+                                boolean addHistory, JSONObject request, Profile profile,
+                                List<BreenoImageBridge.RenderedImage> renderedImages) {
             main.post(() -> {
                 if (generation.get() != requestId) return;
                 try {
@@ -462,10 +687,19 @@ public final class BreenoHookEntry implements IXposedHookLoadPackage {
                             while (histories.size() > 8) histories.remove(histories.keySet().iterator().next());
                         }
                     }
+                    boolean hasImages = renderedImages != null && !renderedImages.isEmpty();
+                    String displayContent = hasImages ? BreenoImageBridge.appendImagePlaceholder(answer) : answer;
                     Class<?> providerClass = XposedHelpers.findClass(
                             "com.heytap.speechassist.aichat.AIChatViewBeanProvider", loader);
                     Object provider = XposedHelpers.getStaticObjectField(providerClass, "INSTANCE");
-                    Object bean = XposedHelpers.callMethod(provider, "f", recordId, roomId, answer);
+                    Object bean = XposedHelpers.callMethod(provider, "f", recordId, roomId, displayContent);
+                    XposedHelpers.callMethod(bean, "setSkillType", "MyAI.StreamTextCard");
+                    XposedHelpers.callMethod(bean, "setFinal", Boolean.TRUE);
+                    XposedHelpers.callMethod(bean, "setFirstSlice", true);
+                    XposedHelpers.callMethod(bean, "setHasTextPrintAnimPlayed", true);
+                    if (hasImages) {
+                        imageBridge.attachMarkdownImages(bean, renderedImages);
+                    }
                     Class<?> centerClass = XposedHelpers.findClass(
                             "com.heytap.speechassist.aichat.AIChatDataCenter", loader);
                     Object center = XposedHelpers.getStaticObjectField(centerClass, "INSTANCE");
@@ -476,6 +710,23 @@ public final class BreenoHookEntry implements IXposedHookLoadPackage {
                     setIdle(roomId);
                 }
             });
+        }
+
+        private void setGenerating(String roomId) {
+            try {
+                if (!roomId.equals(currentRoom())) return;
+                Class<?> stateManagerClass = XposedHelpers.findClass(
+                        "com.heytap.speechassist.aichat.state.AiChatStateManager", loader);
+                Object companion = XposedHelpers.getStaticObjectField(stateManagerClass, STATE_MANAGER_COMPANION_FIELD);
+                Object manager = XposedHelpers.callMethod(companion, "a");
+                Class<?> stateClass = XposedHelpers.findClass(
+                        "com.heytap.speechassist.aichat.state.AiChatState", loader);
+                @SuppressWarnings({"unchecked", "rawtypes"})
+                Object generating = Enum.valueOf((Class<? extends Enum>) stateClass.asSubclass(Enum.class), "GENERATING");
+                XposedHelpers.callMethod(manager, "h", generating, true);
+            } catch (Throwable error) {
+                XposedBridge.log("XiaoBuSwitch: generating state " + error.getClass().getSimpleName());
+            }
         }
 
         private void setIdle(String roomId) {
